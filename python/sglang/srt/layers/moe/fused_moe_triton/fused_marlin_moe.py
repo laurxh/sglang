@@ -224,6 +224,29 @@ def fused_marlin_moe(
     if expert_map is not None:
         intermediate_cache3.zero_()
 
+    # DEBUG EP
+    import os
+    _debug_ep_ctr = getattr(fused_marlin_moe, '_debug_ep_ctr', 0)
+    if expert_map is not None and _debug_ep_ctr < 2 and not torch.cuda.is_current_stream_capturing():
+        rank = int(os.environ.get('RANK', os.environ.get('LOCAL_RANK', '0')))
+        if rank == 0:
+            _ntp = num_tokens_post_padded.item()
+            _n_blocks = _ntp // block_size_m
+            _eid_vals = expert_ids[:_n_blocks].tolist()
+            _valid = [x for x in _eid_vals if x != -1]
+            _invalid = [x for x in _eid_vals if x == -1]
+            print(f"[DEBUG EP] M={M} topk={topk} E={E} block_size_m={block_size_m} "
+                  f"num_tokens_post_padded={_ntp} n_blocks={_n_blocks} "
+                  f"valid_blocks={len(_valid)} invalid_blocks={len(_invalid)} "
+                  f"expert_ids_valid={_valid[:20]} "
+                  f"topk_ids_flat={topk_ids.view(-1)[:16].tolist()} "
+                  f"topk_weights={topk_weights.view(-1)[:16].tolist()} "
+                  f"hidden_norm={hidden_states.float().norm().item():.4f} "
+                  f"cache1_norm={intermediate_cache1.float().norm().item():.4f} "
+                  f"cache2_norm={intermediate_cache2.float().norm().item():.4f}",
+                  flush=True)
+        fused_marlin_moe._debug_ep_ctr = _debug_ep_ctr + 1
+
     intermediate_cache3 = moe_wna16_marlin_gemm(
         intermediate_cache2,
         intermediate_cache3,
@@ -252,6 +275,16 @@ def fused_marlin_moe(
         use_fp32_reduce=True,
         is_zp_float=False,
     ).view(-1, topk, K)
+
+    # DEBUG EP post gemm2
+    if expert_map is not None and _debug_ep_ctr <= 2 and not torch.cuda.is_current_stream_capturing():
+        rank = int(os.environ.get('RANK', os.environ.get('LOCAL_RANK', '0')))
+        if rank == 0:
+            print(f"[DEBUG EP post-gemm2] cache3_norm={intermediate_cache3.float().norm().item():.4f} "
+                  f"cache3_shape={list(intermediate_cache3.shape)} "
+                  f"cache3_nonzero={intermediate_cache3.count_nonzero().item()} "
+                  f"cache3_max={intermediate_cache3.float().abs().max().item():.6f}",
+                  flush=True)
 
     output = hidden_states if inplace else torch.empty_like(hidden_states)
 

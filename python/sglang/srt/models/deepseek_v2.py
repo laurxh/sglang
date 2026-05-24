@@ -903,6 +903,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states, gemm_output_zero_allocator
             )
 
+
         final_hidden_states = maybe_fuse_routed_scale_and_shared_add(
             self.experts,
             final_hidden_states,

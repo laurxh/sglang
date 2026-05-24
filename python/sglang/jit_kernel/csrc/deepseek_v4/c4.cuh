@@ -540,7 +540,7 @@ struct FlashCompress4Kernel {
     host::RuntimeCheck(data_ptr != nullptr, "extra tensor data ptr is null");
     if (is_prefill) {
       static_assert(alignof(C4IndexBundle) == 16);
-      host::RuntimeCheck(std::bit_cast<uintptr_t>(data_ptr) % 16 == 0, "extra tensor is not properly aligned");
+      host::RuntimeCheck(reinterpret_cast<uintptr_t>(data_ptr) % 16 == 0, "extra tensor is not properly aligned");
     }
     return data_ptr;
   }

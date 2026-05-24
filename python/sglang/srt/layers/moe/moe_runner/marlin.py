@@ -115,6 +115,18 @@ def fused_experts_none_to_marlin(
         marlin_hidden_states = hidden_states.to(torch.bfloat16)
         marlin_inplace = False
 
+    # In EP mode (num_local_experts < num_experts), topk_ids contain -1 for
+    # experts not on this rank. The Marlin kernel must skip those blocks,
+    # which it only does when is_ep=True (i.e. expert_map is not None).
+    expert_map = quant_info.expert_map
+    if (
+        expert_map is None
+        and runner_config.num_local_experts is not None
+        and runner_config.num_experts is not None
+        and runner_config.num_local_experts < runner_config.num_experts
+    ):
+        expert_map = torch.empty(0, dtype=torch.int32, device=hidden_states.device)
+
     output = fused_marlin_moe(
         hidden_states=marlin_hidden_states,
         w1=quant_info.w13_qweight,
@@ -124,7 +136,7 @@ def fused_experts_none_to_marlin(
         gating_output=topk_output.router_logits,
         topk_weights=topk_output.topk_weights,
         topk_ids=topk_output.topk_ids,
-        expert_map=quant_info.expert_map,
+        expert_map=expert_map,
         g_idx1=quant_info.w13_g_idx,
         g_idx2=quant_info.w2_g_idx,
         sort_indices1=quant_info.w13_g_idx_sort_indices,

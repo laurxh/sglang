@@ -18,9 +18,13 @@ import logging
 from functools import lru_cache
 from typing import Iterable, Optional, Set, Tuple, Union
 
+import os
 import torch
 import torch.nn as nn
+import torch.cuda.nvtx as nvtx
 import triton
+
+_SYNC_PROFILE = os.environ.get("SGLANG_SYNC_PROFILE", "0") == "1"
 
 from sglang.jit_kernel.triton.gdn_fused_proj import (
     fused_qkvzba_split_reshape_cat_contiguous,
@@ -617,10 +621,16 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         )
 
         if not forward_batch.forward_mode.is_idle():
+            if _SYNC_PROFILE:
+                torch.cuda.synchronize()
+                nvtx.range_push(f"layer{self.layer_id}_linear_attn")
             hidden_states = self.linear_attn(
                 hidden_states,
                 forward_batch,
             )
+            if _SYNC_PROFILE:
+                torch.cuda.synchronize()
+                nvtx.range_pop()
 
         # Fully Connected
         hidden_states, residual = self.layer_communicator.prepare_mlp(
@@ -636,6 +646,9 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
                 forward_batch
             )
         )
+        if _SYNC_PROFILE:
+            torch.cuda.synchronize()
+            nvtx.range_push(f"layer{self.layer_id}_moe")
         if isinstance(self.mlp, Qwen2MoeSparseMoeBlock):
             hidden_states = self.mlp(
                 hidden_states,
@@ -647,6 +660,9 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
             hidden_states = self.mlp(
                 hidden_states, should_allreduce_fusion, use_reduce_scatter
             )
+        if _SYNC_PROFILE:
+            torch.cuda.synchronize()
+            nvtx.range_pop()
         if should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
         else:
@@ -886,11 +902,17 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         )
 
         if not forward_batch.forward_mode.is_idle():
+            if _SYNC_PROFILE:
+                torch.cuda.synchronize()
+                nvtx.range_push(f"layer{self.layer_id}_full_attn")
             hidden_states = self.self_attention(
                 positions=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
+            if _SYNC_PROFILE:
+                torch.cuda.synchronize()
+                nvtx.range_pop()
 
         # Fully Connected
         hidden_states, residual = self.layer_communicator.prepare_mlp(
@@ -905,6 +927,9 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
                 forward_batch
             )
         )
+        if _SYNC_PROFILE:
+            torch.cuda.synchronize()
+            nvtx.range_push(f"layer{self.layer_id}_moe")
         if isinstance(self.mlp, Qwen2MoeSparseMoeBlock):
             hidden_states = self.mlp(
                 hidden_states,
@@ -916,6 +941,9 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             hidden_states = self.mlp(
                 hidden_states, should_allreduce_fusion, use_reduce_scatter
             )
+        if _SYNC_PROFILE:
+            torch.cuda.synchronize()
+            nvtx.range_pop()
         if should_allreduce_fusion:
             hidden_states._sglang_needs_allreduce_fusion = True
         else:
