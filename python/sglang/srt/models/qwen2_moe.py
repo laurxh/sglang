@@ -248,8 +248,12 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         if self.enable_shared_expert_fusion:
             self.num_fused_shared_experts = self.num_shared_experts
 
+        # Allow overriding num_experts_per_tok via env var for experiments
+        import os
+        top_k = int(os.environ.get("SGLANG_MOE_TOP_K", config.num_experts_per_tok))
+
         self.topk = TopK(
-            top_k=config.num_experts_per_tok,
+            top_k=top_k,
             renormalize=config.norm_topk_prob,
             layer_id=layer_id,
         )
@@ -257,9 +261,9 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         self.experts = get_moe_impl_class(quant_config)(
             layer_id=self.layer_id,
             top_k=(
-                config.num_experts_per_tok
+                top_k
                 if not self.enable_shared_expert_fusion
-                else config.num_experts_per_tok + self.num_fused_shared_experts
+                else top_k + self.num_fused_shared_experts
             ),
             num_experts=(
                 config.num_experts + get_global_server_args().ep_num_redundant_experts
@@ -325,7 +329,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             self.num_experts = (
                 config.num_experts + get_global_server_args().ep_num_redundant_experts
             )
-            self.top_k = config.num_experts_per_tok
+            self.top_k = top_k
         self.is_nextn = is_nextn
 
     def get_moe_weights(self):
@@ -390,6 +394,8 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
     def _forward_shared_experts(self, hidden_states: torch.Tensor):
         shared_output = None
         if self.shared_expert is not None:
+            from sglang.srt.models.qwen3_5 import _component_timer
+            _h = _component_timer.start("shared_expert")
             shared_output = self.shared_expert(hidden_states)
             if self.shared_expert_gate is not None:
                 if use_intel_amx_backend(self.shared_expert_gate):
@@ -405,6 +411,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                         F.sigmoid(self.shared_expert_gate(hidden_states))
                         * shared_output
                     )
+            _component_timer.stop(_h)
 
         return shared_output
 
@@ -451,6 +458,8 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         return final_hidden_states
 
     def _forward_router_experts(self, hidden_states: torch.Tensor):
+        from sglang.srt.models.qwen3_5 import _component_timer
+        _h = _component_timer.start("topk_experts")
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
@@ -458,7 +467,9 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             topk_output
         ):
             topk_output = self._append_shared_to_topk_output(topk_output, hidden_states)
-        return self.experts(hidden_states, topk_output)
+        result = self.experts(hidden_states, topk_output)
+        _component_timer.stop(_h)
+        return result
 
     def forward_normal_dual_stream(
         self,

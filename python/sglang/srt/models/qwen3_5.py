@@ -107,6 +107,48 @@ _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _is_amx_available = cpu_has_amx_support()
 
+# ── Component profiling (enabled by SGLANG_PROFILE_COMPONENTS=1) ─────────
+import os as _os
+_PROFILE_ENABLED = _os.environ.get("SGLANG_PROFILE_COMPONENTS", "0") == "1"
+
+class _ComponentTimer:
+    """Lightweight per-forward-pass timer using cuda events."""
+    def __init__(self):
+        self.enabled = False
+        self.records = []  # list of (name, start_event, end_event)
+        self.results = {}  # name -> total_ms (after sync)
+
+    def start(self, name):
+        if not self.enabled:
+            return None
+        ev = torch.cuda.Event(enable_timing=True)
+        ev.record()
+        return (name, ev)
+
+    def stop(self, handle):
+        if handle is None:
+            return
+        name, start_ev = handle
+        end_ev = torch.cuda.Event(enable_timing=True)
+        end_ev.record()
+        self.records.append((name, start_ev, end_ev))
+
+    def sync_and_aggregate(self):
+        torch.cuda.synchronize()
+        self.results.clear()
+        for name, s, e in self.records:
+            self.results[name] = self.results.get(name, 0) + s.elapsed_time(e)
+        self.records.clear()
+        return dict(self.results)
+
+    def reset(self):
+        self.records.clear()
+        self.results.clear()
+
+_component_timer = _ComponentTimer()
+if _PROFILE_ENABLED:
+    _component_timer.enabled = True
+
 cached_get_processor = lru_cache(get_processor)
 
 if _is_npu:
@@ -628,10 +670,12 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         )
 
         if not forward_batch.forward_mode.is_idle():
+            _h = _component_timer.start("linear_attn")
             hidden_states = self.linear_attn(
                 hidden_states,
                 forward_batch,
             )
+            _component_timer.stop(_h)
 
         # Fully Connected
         hidden_states, residual = self.layer_communicator.prepare_mlp(
@@ -648,12 +692,14 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
             )
         )
         if isinstance(self.mlp, Qwen2MoeSparseMoeBlock):
+            _h = _component_timer.start("moe")
             hidden_states = self.mlp(
                 hidden_states,
                 forward_batch,
                 use_reduce_scatter,
                 should_allreduce_fusion,
             )
+            _component_timer.stop(_h)
         else:
             hidden_states = self.mlp(
                 hidden_states, should_allreduce_fusion, use_reduce_scatter
@@ -936,11 +982,13 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         )
 
         if not forward_batch.forward_mode.is_idle():
+            _h = _component_timer.start("group_attn")
             hidden_states = self.self_attention(
                 positions=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
+            _component_timer.stop(_h)
 
         # Fully Connected
         hidden_states, residual = self.layer_communicator.prepare_mlp(
@@ -956,12 +1004,14 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             )
         )
         if isinstance(self.mlp, Qwen2MoeSparseMoeBlock):
+            _h = _component_timer.start("moe")
             hidden_states = self.mlp(
                 hidden_states,
                 forward_batch,
                 use_reduce_scatter,
                 should_allreduce_fusion,
             )
+            _component_timer.stop(_h)
         else:
             hidden_states = self.mlp(
                 hidden_states, should_allreduce_fusion, use_reduce_scatter
@@ -1192,6 +1242,19 @@ class Qwen3_5ForCausalLM(nn.Module):
                 hidden_states = self.norm(hidden_states)
             else:
                 hidden_states, _ = self.norm(hidden_states, residual)
+
+        # Auto-dump component profiling results (rank 0 only to avoid file corruption)
+        if _PROFILE_ENABLED and _component_timer.enabled:
+            import json as _json
+            _profile_results = _component_timer.sync_and_aggregate()
+            from sglang.srt.distributed import get_tensor_model_parallel_rank
+            _rank = get_tensor_model_parallel_rank()
+            if _rank == 0:
+                _profile_path = _os.environ.get(
+                    "SGLANG_PROFILE_OUTPUT", "/tmp/sglang_component_profile.json"
+                )
+                with open(_profile_path, "w") as _f:
+                    _json.dump(_profile_results, _f)
 
         if len(aux_hidden_states) == 0:
             return hidden_states

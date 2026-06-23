@@ -1981,6 +1981,8 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     )
                 state.time_stats.set_finished_time()
                 meta_info["e2e_latency"] = state.time_stats.get_e2e_latency()
+                meta_info["ttft"] = state.time_stats.get_first_token_latency()
+                meta_info["decode_latency"] = state.time_stats.get_decode_latency()
 
                 if self.server_args.speculative_algorithm:
                     self._calculate_spec_decoding_metrics(meta_info, recv_obj, i)

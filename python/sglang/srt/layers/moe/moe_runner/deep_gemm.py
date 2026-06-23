@@ -19,7 +19,6 @@ from sglang.srt.layers.moe.moe_runner.base import (
     register_pre_permute,
 )
 from sglang.srt.layers.moe.utils import MoeRunnerBackend
-from sglang.srt.compilation.piecewise_context_manager import is_in_piecewise_cuda_graph
 from sglang.srt.utils import (
     ceil_div,
     dispose_tensor,
@@ -598,7 +597,9 @@ def _ep_scatter_to_contiguous(
         (all_tokens, K), device=hidden_states_device, dtype=hidden_states_dtype
     )
     if hidden_states_scale is None:
-        input_tensor_scale = torch.empty((1, 1), device=hidden_states_device, dtype=torch.float32)
+        input_tensor_scale = torch.empty(
+            (1, 1), device=hidden_states_device, dtype=torch.float32
+        )
     elif deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0:
         input_tensor_scale = torch.zeros(
             (ceil_div(K // 128, 4), all_tokens),
@@ -676,7 +677,11 @@ def pre_permute_standard_to_deep_gemm(
         expert_counts = torch.zeros(
             num_local_experts + 1, dtype=torch.int32, device=hidden_states_device
         )
-        flat_ids = torch.where(topk_ids >= 0, topk_ids, num_local_experts).view(-1).to(torch.int64)
+        flat_ids = (
+            torch.where(topk_ids >= 0, topk_ids, num_local_experts)
+            .view(-1)
+            .to(torch.int64)
+        )
         expert_counts.scatter_add_(
             0, flat_ids, torch.ones_like(flat_ids, dtype=torch.int32)
         )
